@@ -1,0 +1,173 @@
+set search_path = bookings, public
+
+
+--======== Ответы по задачам ==============
+
+--ЗАДАНИЕ 1
+--В каких городах больше одного аэропорта?
+
+--группируем таблицу аэропортов по одинаковым городам 
+	--считаем количество городов в группе и выводим те, где больше одного
+
+select city, count(*)
+from airports
+group by city
+having count(*) > 1
+
+
+--ЗАДАНИЕ 2
+--В каких аэропортах есть рейсы, выполняемые самолетом с максимальной дальностью перелета?
+
+--связываем самолеты и рейсы, чтобы понимать, какие модели были на каких рейсах
+	--связываем с аэропортами, чтобы вывести нормальное название аэропорта
+	--выбираем в подзапросе самолеты с максимальной дальностью и выбираем аэропорты, в которых были эти самолеты
+
+select  f.arrival_airport, a2.airport_name, a.model, max(a.range) 
+from aircrafts a
+join flights f on a.aircraft_code = f.aircraft_code
+join airports a2 on a2.airport_code = f.arrival_airport 
+where a.range = (
+  select max(range)
+  from aircrafts 
+  )
+group by (f.arrival_airport, a2.airport_name, a.model)
+
+--ЗАДАНИЕ 3
+--Вывести 10 рейсов с максимальным временем задержки вылета
+
+--в таблице рейсов выбираем те самолеты, которые фактически вылетели, т.е. имеют фактическое время вылета
+	--вычисляем время задержки delay
+	--сортируем список в порядке убывания задержки, органичиваем вывод первыми 10 записями (по условию задачи)
+
+select  f.flight_no, f.scheduled_departure, f.actual_departure, (f.actual_departure - f.scheduled_departure) as delay
+from flights f
+where f.actual_departure is  not  null 
+order by delay desc 
+limit 10
+
+
+--ЗАДАНИЕ 4
+--Были ли брони, по которым не были получены посадочные талоны?
+
+--связываем бронирования, посадочные и билеты, чтобы получить связь брони и посадочного
+	--выбираем записи, где нет номера посадочного
+
+select b.book_ref, bp.boarding_no, t.ticket_no
+from bookings b 
+left join tickets t on b.book_ref = t.book_ref 
+left join ticket_flights tf on t.ticket_no = tf.ticket_no 
+left join boarding_passes bp on t.ticket_no = bp.ticket_no and tf.flight_id = bp.flight_id
+where bp.boarding_no is null
+
+
+--ЗАДАНИЕ 5
+--Найдите свободные места для каждого рейса, их % отношение к общему количеству мест в самолете.
+--Добавьте столбец с накопительным итогом - суммарное накопление количества вывезенных пассажиров из каждого аэропорта на каждый день. 
+--Т.е. в этом столбце должна отражаться накопительная сумма - сколько человек уже вылетело из данного аэропорта на этом или более ранних рейсах за день.
+
+
+--в таблице рейсов выбираем выбираем пустые места и считаем их количество
+	--считаем процент пустых мест к общему количеству, общее количество вычисляем подзапросом по каждому самолету
+	--считаем количество вывезенных пассажиров, как количество заполненных мест, т.е. общее количество мест минус количество пустых, расчет добавляем в оконную функцию суммирования
+
+select f.flight_id, s.aircraft_code, count(*) as empty_seats, 
+	round((count(*)::numeric)/(select (count(s2.seat_no)::numeric) from seats s2 where s.aircraft_code = f.aircraft_code), 2) as perc,
+	sum((select (count(s2.seat_no)::numeric) from seats s2 where s.aircraft_code = f.aircraft_code)-count(*)::numeric) 
+		over (partition by f.actual_arrival order by f.flight_id, f.departure_airport)
+from flights f
+join seats s on s.aircraft_code = f.aircraft_code
+where f.actual_departure is not null and 
+	not exists (
+		select null 
+		from boarding_passes bp
+		where bp.flight_id = f.flight_id and bp.seat_no = s.seat_no
+	)
+group by (f.flight_id, s.aircraft_code)
+
+
+
+
+--ЗАДАНИЕ 6
+--Найдите процентное соотношение перелетов по типам самолетов от общего количества.
+
+--в селекте пишем подзапрос для подсчета общего количества перелетов, используем его для вывода в ответ и для расчета процента
+	--свзываем с таблицей самолетов, чтобы вывести модель самолета
+
+select f.aircraft_code, a.model, count(*), (select count(*) from flights) as all, 
+	round(100*count(*)/(select count(*) from flights)) as persent
+from flights f
+join aircrafts a on a.aircraft_code = f.aircraft_code 
+group by (f.aircraft_code, a.model)
+
+
+--ЗАДАНИЕ 7
+--Были ли города, в которые можно  добраться бизнес - классом дешевле, чем эконом-классом в рамках перелета?
+
+--делаем табличное выражение, в котором собираем тарифы по ценам и городам, находим минимум и максимум
+	--делаем join табличного выражения самого на себя, чтобы убрать дублирование строчек для города (будет одна запись с минимумом по бизнесу и максимумом по эконому)
+	--выбираем города, в которых минимальная цена за бизнес меньше максимальной цены эконома
+
+  
+with fares as (
+    select
+      a.city,
+      fare_conditions,
+      min(amount) as min_business,
+      max(amount) as max_economy
+    from ticket_flights tf
+      join flights as f on tf.flight_id = f.flight_id
+      join airports as a on f.arrival_airport = a.airport_code
+    group by (city, fare_conditions)
+    order by a.city, fare_conditions asc
+	) 
+select f.city, f.max_economy,  f2.min_business 
+from fares as f 
+join fares as f2 on f.city  = f2.city
+where f.fare_conditions = 'Economy' and f2. fare_conditions = 'Business' and f.max_economy > f2.min_business
+
+--ЗАДАНИЕ 8
+--Между какими городами нет прямых рейсов?
+
+--создаем табличное выражение, в котором будет список всех городов
+	--делаем произведение всех городов, исключая строки с одинаковыми парами
+	-- исключаем города, которые находятся на одном маршруте (прямые рейсы)
+
+with cities as (
+	select city 
+	from airports 
+	group by city
+	)
+select d.city as departure, a.city as arrival
+from cities a, cities d
+where a.city <> d.city
+except
+  select departure_city, arrival_city
+  from routes
+group by (departure_city, arrival_city)
+
+--ЗАДАНИЕ 9
+--Вычислите расстояние между аэропортами, связанными прямыми рейсами, 
+--сравните с допустимой максимальной дальностью перелетов  в самолетах, обслуживающих эти рейсы
+
+--выбираем из представления маршрутов прямые рейсы, чтобы считать расстояние между аэропортами
+	--считаем максимальную дальность. это нужно, если на одном маршруте бывают самолеты с разной дальностью
+	--считаем расстояние между точками, используя формулу из задания, с применением тригонометрических функций для градусов, т.к. координаты в градусах
+	--сравниваем максимальную дальность на каждом рейсе с расстоянием между аэропортами и результат сравнения выводим в отдельном столбце 
+
+select r.departure_airport, r.arrival_airport, 
+a2.longitude as dep_longitude, a3.longitude as ar_longitude, 
+a2.latitude as dep_latitude, a3.latitude as ar_latitude, 
+		max(a.range) over (partition by a.aircraft_code) as max_range,
+		(acos(sind(a2.latitude)*sind(a3.latitude) + cosd(a2.latitude)*cosd(a3.latitude)*cosd(a2.longitude - a3.longitude)))*6371 as calc,
+		case 
+				when a.range > (acos(sind(a2.latitude)*sind(a3.latitude) + cosd(a2.latitude)*cosd(a3.latitude)*cosd(a2.longitude - a3.longitude)))*6371 
+				then 'расстояние меньше дальности' 
+				when a.range < (acos(sind(a2.latitude)*sind(a3.latitude) + cosd(a2.latitude)*cosd(a3.latitude)*cosd(a2.longitude - a3.longitude)))*6371 
+				then 'расстояние больше дальности' 
+				else 'расстояния равны' 
+				end as compare
+from routes r
+join aircrafts a on r.aircraft_code = a.aircraft_code 
+join airports a2 on r.departure_airport = a2.airport_code 
+join airports a3 on r.arrival_airport = a3.airport_code 
+group by (r.departure_airport, r.arrival_airport, a.aircraft_code, a2.longitude, a3.longitude, a2.latitude, a3.latitude)
